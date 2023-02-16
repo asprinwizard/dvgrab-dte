@@ -1040,6 +1040,19 @@ void DVgrab::captureThreadRun()
 		{
 			if ( m_hdv )
 			{
+				HDVFrame *hdvframe = static_cast<HDVFrame*>( m_frame );
+				TimeCode timeCode = { 0, 0, 0, 0 };
+				hdvframe->GetTimeCode( timeCode );
+				//if ( hdvframe->IsNormalSpeed() &&
+				     ( m_jpeg_overwrite ||
+				       !m_avc ||
+				       !m_isRecordMode ||
+				       ( m_isRecordMode &&
+				         strcmp( avc1394_vcr_decode_status( m_transportStatus ), "Recording" ) == 0 &&
+				         !( timeCode.hour == 0 && timeCode.min == 0  && timeCode.sec == 0 && timeCode.frame == 0 )
+				       )
+				     )
+				//)
 				writeFrame();
 			}
 			else
