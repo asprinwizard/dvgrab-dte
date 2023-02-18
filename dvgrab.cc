@@ -1137,8 +1137,8 @@ void DVgrab::status( )
 	else
 		duration = "";
 
-	fprintf( stderr, "%-80.80s\r", " " );
-	fprintf( stderr, "\"%s\" %s \"%s\" %8s sec\r", transportStatus.c_str(),
+	fprintf( stderr, "%-80.80s\n", " " );
+	fprintf( stderr, "\"%s\" %s \"%s\" %8s sec\n", transportStatus.c_str(),
 	         timecode.c_str(),
 	         filename.c_str(),
 	         duration.c_str() );

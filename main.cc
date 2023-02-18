@@ -120,9 +120,10 @@ int main( int argc, char *argv[] )
 			while ( !g_done )
 			{
 				dvgrab.status( );
-				if ( ( c = term_read() ) != -1 )
-					if ( !dvgrab.execute( c ) )
-						break;
+				//if ( ( c = term_read() ) != -1 )
+				sleep(3);
+				if ( !dvgrab.execute( c ) )
+					break;
 			}
 			term_exit();
 		}
