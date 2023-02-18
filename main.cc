@@ -117,6 +117,9 @@ int main( int argc, char *argv[] )
 		{
 			term_init();
 			fprintf( stderr, "Going interactive. Press '?' for help.\n" );
+			dvgrab.status( );
+			sleep(3);
+			dvgrab.execute( c );
 			while ( !g_done )
 			{
 				dvgrab.status( );
