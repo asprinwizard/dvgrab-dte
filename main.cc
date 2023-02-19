@@ -119,15 +119,17 @@ int main( int argc, char *argv[] )
 			fprintf( stderr, "Going interactive. Press '?' for help.\n" );
 			dvgrab.status( );
 			sleep(3);
-			dvgrab.execute( c );
+			//dvgrab.execute( c );
+			dvgrab.startCapture();
 			while ( !g_done )
 			{
 				dvgrab.status( );
 				//if ( ( c = term_read() ) != -1 )
-				sleep(3);
+				//sleep(3);
 				if ( !dvgrab.execute( c ) )
 					break;
 			}
+			fprintf( stderr, "Exiting\n" );
 			term_exit();
 		}
 		else
