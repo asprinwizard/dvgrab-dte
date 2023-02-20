@@ -84,7 +84,7 @@ void sendEventParams( int preline, int postline, const char *format, ... )
 		if ( preline == 1 )
 			fprintf( stderr, "\n" );
 		else if ( preline == 2 )
-			fprintf( stderr, "\r%-80.80s\r", " " );
+			fprintf( stderr, "\n%-80.80s\n", " " );
 	}
 
 	if ( postline )

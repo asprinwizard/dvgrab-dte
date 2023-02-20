@@ -1040,6 +1040,18 @@ void DVgrab::captureThreadRun()
 		{
 			if ( m_hdv )
 			{
+				HDVFrame *hdvframe = static_cast<HDVFrame*>( m_frame );
+				TimeCode timeCode = { 0, 0, 0, 0 };
+				hdvframe->GetTimeCode( timeCode );
+				if ( ( m_jpeg_overwrite ||
+				       !m_avc ||
+				       !m_isRecordMode ||
+				       ( m_isRecordMode &&
+				         strcmp( avc1394_vcr_decode_status( m_transportStatus ), "Recording" ) == 0 &&
+				         !( timeCode.hour == 0 && timeCode.min == 0  && timeCode.sec == 0 && timeCode.frame == 0 )
+				       )
+				     )
+				)
 				writeFrame();
 			}
 			else
@@ -1125,8 +1137,8 @@ void DVgrab::status( )
 	else
 		duration = "";
 
-	fprintf( stderr, "%-80.80s\r", " " );
-	fprintf( stderr, "\"%s\" %s \"%s\" %8s sec\r", transportStatus.c_str(),
+	fprintf( stderr, "%-80.80s\n", " " );
+	fprintf( stderr, "\"%s\" %s \"%s\" %8s sec\n", transportStatus.c_str(),
 	         timecode.c_str(),
 	         filename.c_str(),
 	         duration.c_str() );

@@ -41,7 +41,7 @@ char *chomp( char *input )
 		int length = strlen( input );
 		if ( length && input[ length - 1 ] == '\n' )
 			input[ length - 1 ] = '\0';
-		if ( length > 1 && input[ length - 2 ] == '\r' )
+		if ( length > 1 && input[ length - 2 ] == '\n' )
 			input[ length - 2 ] = '\0';
 	}
 	return input;
