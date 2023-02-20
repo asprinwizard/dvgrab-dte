@@ -116,20 +116,14 @@ int main( int argc, char *argv[] )
 		if ( dvgrab.isInteractive() )
 		{
 			term_init();
-			fprintf( stderr, "Going interactive. Press '?' for help.\n" );
+			fprintf( stderr, "DVGRAB is running in DTE mode\n" );
 			dvgrab.status( );
-			sleep(3);
-			//dvgrab.execute( c );
+			sleep(1);
 			dvgrab.startCapture();
 			while ( !g_done )
 			{
 				dvgrab.status( );
-				//if ( ( c = term_read() ) != -1 )
-				//sleep(3);
-				if ( !dvgrab.execute( c ) )
-					break;
 			}
-			fprintf( stderr, "Exiting\n" );
 			term_exit();
 		}
 		else
