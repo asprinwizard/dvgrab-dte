@@ -53,12 +53,46 @@ using std::endl;
 #include "io.h"
 #include "dvgrab.h"
 #include "error.h"
+#include "jsonout.h"
 
 bool g_done = false;
+std::atomic<int> g_armed( 0 );
+std::atomic<unsigned> g_arm_generation( 0 );
 
 void signal_handler( int sig )
 {
 	g_done = true;
+}
+
+// Lock-free atomics only, so these are safe in a signal handler.
+void arm_handler( int sig )
+{
+	g_armed.store( sig == SIGUSR1 ? 1 : 0 );
+	g_arm_generation.fetch_add( 1 );
+}
+
+static void sleep_ms( long ms )
+{
+	struct timespec t = { ms / 1000, ( ms % 1000 ) * 1000000L };
+	nanosleep( &t, NULL );
+}
+
+static bool args_have( int argc, char *argv[], const char *name )
+{
+	for ( int i = 1; i < argc; ++i )
+	{
+		const char *a = argv[ i ];
+		while ( *a == '-' )
+			++a;
+		if ( strcmp( a, name ) == 0 )
+			return true;
+	}
+	return false;
+}
+
+static void send_error( const char *code, const char *message )
+{
+	JsonEvent( "error" ).str( "code", code ).str( "message", message ).send();
 }
 
 int rt_raisepri (int pri)
@@ -96,15 +130,24 @@ int main( int argc, char *argv[] )
 	int ret = 0;
 
 	fcntl( fileno( stderr ), F_SETFL, O_NONBLOCK );
+
+	// Install every handler before anything slow happens: by default SIGUSR1
+	// would kill the process, and the app may arm recording as soon as it
+	// sees "ready".
+	signal( SIGINT, signal_handler );
+	signal( SIGTERM, signal_handler );
+	signal( SIGHUP, signal_handler );
+	signal( SIGPIPE, signal_handler );
+	signal( SIGUSR1, arm_handler );
+	signal( SIGUSR2, arm_handler );
+
+	// Errors thrown while parsing options or opening the camera must also be
+	// reported as JSON, so enable it before DVgrab is constructed.
+	json_enable( args_have( argc, argv, "json" ) );
+
 	try
 	{
-		char c;
 		DVgrab dvgrab( argc, argv );
-
-		signal( SIGINT, signal_handler );
-		signal( SIGTERM, signal_handler );
-		signal( SIGHUP, signal_handler );
-		signal( SIGPIPE, signal_handler );
 
 		if ( rt_raisepri( 1 ) != 0 )
 			setpriority( PRIO_PROCESS, 0, -20 );
@@ -113,25 +156,38 @@ int main( int argc, char *argv[] )
 		mlockall( MCL_CURRENT | MCL_FUTURE );
 #endif
 
+		dvgrab.sendReady();
+
 		if ( dvgrab.isInteractive() )
 		{
+			// DTE mode: capture straight away; no keyboard control.
 			term_init();
 			fprintf( stderr, "DVGRAB is running in DTE mode\n" );
 			dvgrab.status( );
-			sleep(1);
-			dvgrab.startCapture();
+			for ( int i = 0; i < 4 && !g_done; ++i )
+			{
+				dvgrab.emitStatus( true );
+				sleep_ms( 250 );
+			}
+			if ( !g_done )
+				dvgrab.startCapture();
 			while ( !g_done )
 			{
 				dvgrab.status( );
+				dvgrab.emitStatus( );
+				sleep_ms( 250 );
 			}
+			dvgrab.stopCapture();
 			term_exit();
 		}
 		else
 		{
 			dvgrab.startCapture();
-			while ( !g_done )
-				if ( dvgrab.done() )
-					break;
+			while ( !g_done && !dvgrab.done() )
+			{
+				dvgrab.emitStatus( );
+				sleep_ms( 100 );
+			}
 			dvgrab.stopCapture();
 		}
 	}
@@ -139,15 +195,18 @@ int main( int argc, char *argv[] )
 	{
 		fprintf( stderr, "Error: %s\n", s.c_str() );
 		fflush( stderr );
+		send_error( "fatal", s.c_str() );
 		ret = 1;
 	}
 	catch ( ... )
 	{
 		fprintf( stderr, "Error: unknown\n" );
 		fflush( stderr );
+		send_error( "fatal", "unknown" );
 		ret = 1;
 	}
 
+	JsonEvent( "exit" ).num( "code", ret ).send();
 	fprintf( stderr, "\n" );
 	return ret;
 }

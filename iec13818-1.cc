@@ -488,7 +488,8 @@ void PES::AddData( unsigned char *d, int l )
 	}
 	else
 	{
-		printf("PES data overflow!\n");
+		// stderr: stdout carries the --json status stream.
+		fprintf( stderr, "PES data overflow!\n" );
 	}
 }
 

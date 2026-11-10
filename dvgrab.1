@@ -310,6 +310,28 @@ and stop.
 .IP "\fB-nostop\fP" 10
 Disables sending the AV/C VTR stop command when exiting \fBdvgrab\fP.
 
+.IP "\fB-json\fP" 10
+(DTE) Write machine-readable status to stdout as JSON Lines, one object per
+line. Every object has a \fBtype\fP: \fBready\fP, \fBstatus\fP (with
+\fBstatus\fP WAIT, REC or STBY, \fBtimecode\fP, \fBelapsed\fP, \fBformat\fP
+and \fBfile\fP), \fBfile_open\fP, \fBfile_closed\fP, \fBwarning\fP,
+\fBerror\fP and \fBexit\fP. Human-readable messages stay on stderr. Cannot be
+combined with \fB-\fP (raw output on stdout).
+
+.IP "\fB-passive\fP" 10
+(DTE) Never send AV/C transport commands (play, pause, stop, rewind) to the
+device; status and timecode are still queried. Implies \fB-nostop\fP.
+
+.IP "\fB-sync-interval\fP \fInum\fP" 10
+(DTE) Flush the file being written to disk (fdatasync) every \fInum\fP
+seconds, and before it is closed, to limit what is lost on a power cut.
+0 (the default) turns this off.
+
+.IP "\fB-trigger\fP" 10
+(DTE) Write frames only while armed. Recording starts disarmed; SIGUSR1 arms
+it and SIGUSR2 disarms it. Each armed period (take) is written to its own
+file, and HDV takes start on a GOP boundary.
+
 .IP "\fB-opendml\fP" 10
 If using \fB-format dv2\fP, create an OpenDML-compliant type 2 DV AVI. This
 is required to support dv2 files >1GB. dv1 always supports files >1GB.

@@ -111,6 +111,12 @@ public:
 	virtual bool Create( const string& filename ) = 0;
 	virtual int Write( Frame *frame ) = 0;
 	virtual int Close() = 0;
+	/// Flush written data to disk (fdatasync). Formats without a plain file
+	/// descriptor do nothing.
+	virtual int Sync()
+	{
+		return 0;
+	}
 	virtual bool Done( void );
 
 	virtual bool Open( const char *s ) = 0;
@@ -181,6 +187,7 @@ public:
 	bool Create( const string& filename );
 	int Write( Frame *frame );
 	int Close();
+	int Sync();
 	off_t GetFileSize();
 	int GetTotalFrames();
 	bool Open( const char *s );
@@ -331,6 +338,7 @@ public:
 	bool Create( const string& filename );
 	int Write( Frame *frame );
 	int Close();
+	int Sync();
 	off_t GetFileSize();
 	int GetTotalFrames();
 	bool Open( const char *s );

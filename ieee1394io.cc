@@ -1028,6 +1028,9 @@ void pipeReader::StopThread()
 	pthread_cancel( thread );
 	pthread_join( thread, NULL );
 	Flush();
+	// Wake the capture thread, as iec61883Reader::StopThread does; otherwise
+	// stopping before the end of the pipe leaves it waiting forever.
+	TriggerAction( );
 }
 
 

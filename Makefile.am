@@ -10,7 +10,7 @@ bin_PROGRAMS     = dvgrab
 dvgrab_SOURCES = affine.h avi.cc avi.h dvframe.cc dvframe.h dvgrab.cc dvgrab.h \
 	endian_types.h error.cc error.h filehandler.cc filehandler.h frame.cc frame.h \
 	hdvframe.cc hdvframe.h iec13818-1.cc iec13818-1.h iec13818-2.cc iec13818-2.h \
-	ieee1394io.cc ieee1394io.h io.c io.h main.cc raw1394util.c raw1394util.h riff.cc \
+	ieee1394io.cc ieee1394io.h io.c io.h jsonout.cc jsonout.h main.cc raw1394util.c raw1394util.h riff.cc \
 	riff.h smiltime.cc smiltime.h stringutils.cc stringutils.h v4l2reader.h v4l2reader.cc \
 	srt.h srt.cc
 

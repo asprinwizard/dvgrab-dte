@@ -51,8 +51,25 @@ using std::endl;
 #include "stringutils.h"
 #include "v4l2reader.h"
 #include "srt.h"
+#include "jsonout.h"
 
 extern bool g_done;
+
+static long long now_ms()
+{
+	struct timespec t;
+	clock_gettime( CLOCK_MONOTONIC, &t );
+	return ( long long ) t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+static std::string hms( long long seconds )
+{
+	char buf[ 16 ];
+	if ( seconds < 0 )
+		seconds = 0;
+	snprintf( buf, sizeof( buf ), "%02lld:%02lld:%02lld", ( seconds / 3600 ) % 100, ( seconds / 60 ) % 60, seconds % 60 );
+	return buf;
+}
 pthread_mutex_t DVgrab::capture_mutex;
 pthread_t DVgrab::capture_thread;
 pthread_t DVgrab::watchdog_thread;
@@ -77,7 +94,10 @@ DVgrab::DVgrab( int argc, char *argv[] ) :
 		m_captureActive( false ), m_avc( 0 ), m_reader( 0 ), m_hdv( false ), m_showstatus( false ),
 		m_isLastTimeCodeSet( false ), m_isLastRecDateSet( false ), m_v4l2( false ), m_jvc_p25( false ),
 		m_24p( false ), m_24pa( false ), m_isRecordMode( false ), m_isRewindFirst( false ),
-		m_timeSplit(0), m_srt( false ), m_isNewFile(false)
+		m_timeSplit(0), m_srt( false ), m_isNewFile(false),
+		m_json( false ), m_trigger( false ), m_passive( false ), m_sync_interval( 0 ),
+		m_lastWriteMs( 0 ), m_takeStartMs( 0 ), m_lastSyncMs( 0 ), m_gateOpen( false ),
+		m_seenArmGeneration( 0 ), m_curTimeCodeValid( false ), m_lastSentMs( 0 )
 {
 	m_frame = 0;
 	m_writer = 0;
@@ -117,7 +137,7 @@ DVgrab::DVgrab( int argc, char *argv[] ) :
 			m_avc = new AVC( m_port );
 			if ( ! m_avc )
 				throw std::string( "failed to initialize AV/C" );
-			if ( m_interactive )
+			if ( m_interactive && !m_passive )
 				m_avc->Pause( m_node );
 			if ( m_avc->isHDV( m_node ) )
 			{
@@ -230,6 +250,10 @@ void DVgrab::print_help()
 	cerr << "                          -1 = unlimited [default " << DEFAULT_LOCKSTEP_TOTALDROPS << "]" << endl;
 	cerr << "  -noavc               disable use of AV/C VTR control" << endl;
 	cerr << "  -nostop              do not send AV/C stop command on exit" << endl;
+	cerr << "  -json                write status as JSON Lines on stdout (DTE)" << endl;
+	cerr << "  -passive             never send AV/C transport commands; implies -nostop (DTE)" << endl;
+	cerr << "  -sync-interval n     fdatasync the open file every n seconds, 0 = off (DTE)" << endl;
+	cerr << "  -trigger             write only while armed: SIGUSR1 arms, SIGUSR2 disarms (DTE)" << endl;
 	cerr << "  -opendml             use the OpenDML extensions to write large (>1GB)" << endl;
 	cerr << "                          'Type 2' DV AVI files (requires -format dv2)" << endl;
 	cerr << "  -r, recordonly       only capture when not paused while in record mode" << endl;
@@ -284,9 +308,12 @@ void DVgrab::set_file_format( char *format )
 void DVgrab::set_format_from_name( void )
 {
 	std::string filename = m_dst_file_name;
-	if ( filename.find( '.' ) != string::npos )
+	// Only look for an extension in the file name, not in the folders above it.
+	std::string::size_type slash = filename.find_last_of( '/' );
+	std::string::size_type dot = filename.find_last_of( '.' );
+	if ( dot != string::npos && ( slash == string::npos || dot > slash ) )
 	{
-		std::string ext = StringUtils::toUpper( filename.substr( filename.find_last_of( '.' ) + 1 ) );
+		std::string ext = StringUtils::toUpper( filename.substr( dot + 1 ) );
 
 		if ( ext == "AVI" )
 			m_file_format = AVI_DV2_FORMAT;
@@ -307,7 +334,7 @@ void DVgrab::set_format_from_name( void )
 			exit( EXIT_FAILURE );
 		}
 		if ( m_file_format != JPEG_FORMAT )
-			m_dst_file_name[ filename.find_last_of( '.' ) ] = '\0';
+			m_dst_file_name[ dot ] = '\0';
 	}
 }
 
@@ -347,6 +374,10 @@ void DVgrab::getargs( int argc, char *argv[] )
 		{ "lockstep_totaldrops", required_argument, &m_lockstep_totaldrops, 0xff },
 		{ "noavc", no_argument, &m_noavc, true },
 		{ "nostop", no_argument, &m_no_stop, true },
+		{ "json", no_argument, &m_json, true },
+		{ "passive", no_argument, &m_passive, true },
+		{ "sync-interval", required_argument, &m_sync_interval, 0xff },
+		{ "trigger", no_argument, &m_trigger, true },
 		{ "opendml", no_argument, &m_open_dml, true },
 		{ "recordonly", no_argument, 0, 'r'},
 		{ "rewind", no_argument, &m_isRewindFirst, true },
@@ -511,6 +542,15 @@ void DVgrab::getargs( int argc, char *argv[] )
 
 	if ( m_dst_file_name == NULL && !m_raw_pipe )
 		m_dst_file_name = strdup( "dvgrab-" );
+
+	if ( m_passive )
+		m_no_stop = true;
+	if ( m_json && m_raw_pipe )
+	{
+		cerr << "-json can't be used with '-' (raw output on stdout)." << endl;
+		print_usage();
+		exit( EXIT_FAILURE );
+	}
 }
 
 void DVgrab::startCapture()
@@ -586,7 +626,7 @@ void DVgrab::startCapture()
 
 	if ( m_avc )
 	{
-		if ( m_isRewindFirst && !m_interactive )
+		if ( m_isRewindFirst && !m_interactive && !m_passive )
 		{
 			// Stop whatever is happening
 			m_avc->Stop( m_node );
@@ -619,7 +659,7 @@ void DVgrab::startCapture()
 		}
 
 		// Now Play so we can capture something
-		if ( !g_done )
+		if ( !g_done && !m_passive )
 			m_avc->Play( m_node );
 	}
 
@@ -628,6 +668,7 @@ void DVgrab::startCapture()
 	// this is a little unclean, checking global g_done from main.cc to allow interruption
 	while ( !g_done && m_frame == NULL )
 	{
+		emitStatus( true );   // "WAIT" keep-alive, at most once a second
 		timespec t = {0, 25000000L};
 		nanosleep( &t, NULL );
 	}
@@ -659,7 +700,7 @@ void DVgrab::startCapture()
 }
 
 
-void DVgrab::stopCapture()
+void DVgrab::stopCapture( const char *reason )
 {
 	pthread_mutex_lock( &capture_mutex );
 	if ( m_writer != NULL )
@@ -667,11 +708,17 @@ void DVgrab::stopCapture()
 		std::string filename = m_writer->GetFileName();
 		int frames = m_writer->GetFramesWritten();
 		float size = ( float ) m_writer->GetFileSize() / 1024 / 1024;
+		bool wasOpen = m_writer->FileIsOpen();
 
+		if ( wasOpen )
+			m_writer->Sync();
 		m_writer->Close();
 		delete m_writer;
 		m_writer = NULL;
-		if ( m_avc && m_interactive )
+		if ( wasOpen )
+			reportFileClosed( filename, reason, frames, size );
+		m_gateOpen = false;
+		if ( m_avc && m_interactive && !m_passive )
 			m_avc->Pause( m_node );
 		if ( m_frame != NULL )
 		{
@@ -884,8 +931,30 @@ void DVgrab::writeFrame()
 		if ( ! m_writer->WriteFrame( m_frame ) )
 		{
 			pthread_mutex_unlock( &capture_mutex );
-			stopCapture();
+			stopCapture( "error" );
 			throw std::string( "writing failed" );
+		}
+
+		long long now = now_ms();
+		m_lastWriteMs.store( now );
+		if ( m_writer->IsNewFile() )
+		{
+			// An autosplit or size split closed the previous file inside
+			// FileHandler::WriteFrame and opened this one.
+			std::string previous;
+			{
+				std::lock_guard<std::mutex> lock( m_state );
+				previous = m_openFile;
+			}
+			if ( !previous.empty() && previous != std::string( m_writer->GetFileName().c_str() ) )
+				reportFileClosed( previous, "split", framesWritten, size );
+			reportFileOpened( m_writer->GetFileName() );
+			m_lastSyncMs = now;
+		}
+		else if ( m_sync_interval > 0 && now - m_lastSyncMs >= ( long long ) m_sync_interval * 1000 )
+		{
+			m_writer->Sync();
+			m_lastSyncMs = now;
 		}
 
 		m_isNewFile |= m_writer->IsNewFile();
@@ -955,6 +1024,83 @@ void DVgrab::sendFrameDroppedStatus( const char *reason, const char *meaning )
 		m_writer ? m_writer->GetFileName().c_str() : "", reason, tc, rd );
 
 	sendEvent( meaning );
+
+	const char *code = strstr( reason, "damaged" ) ? "damaged_frames" :
+	                   strstr( reason, "underrun" ) ? "buffer_underrun" : "dropped_frames";
+	std::string message = std::string( reason ) + " timecode " + tc;
+	JsonEvent( "warning" ).str( "code", code ).num( "dropped", m_dropped_frames )
+		.num( "damaged", m_bad_frames ).str( "message", message ).send();
+}
+
+void DVgrab::reportFileOpened( const std::string& name )
+{
+	std::string clean( name.c_str() );
+	{
+		std::lock_guard<std::mutex> lock( m_state );
+		m_openFile = clean;
+	}
+	JsonEvent( "file_open" ).str( "file", clean ).send();
+}
+
+void DVgrab::reportFileClosed( const std::string& name, const char *reason, int frames, float sizeMb )
+{
+	std::string clean( name.c_str() );
+	{
+		std::lock_guard<std::mutex> lock( m_state );
+		if ( m_openFile != clean )
+			return;     // already reported (or never reported as open)
+		m_openFile.clear();
+	}
+	JsonEvent( "file_closed" ).str( "file", clean ).str( "reason", reason ).num( "frames", frames )
+		.dbl( "size_mb", sizeMb ).num( "dropped", m_dropped_frames ).num( "damaged", m_bad_frames ).send();
+}
+
+/** Closes the current take's file. Caller holds capture_mutex. */
+void DVgrab::closeTakeLocked( const char *reason )
+{
+	if ( m_writer != NULL && m_writer->FileIsOpen() )
+	{
+		std::string name = m_writer->GetFileName();
+		int frames = m_writer->GetFramesWritten();
+		float size = ( float ) m_writer->GetFileSize() / 1024 / 1024;
+		m_writer->Sync();
+		m_writer->CollectionCounterUpdate();
+		m_writer->Close();
+		reportFileClosed( name, reason, frames, size );
+	}
+	m_gateOpen = false;
+	m_lastWriteMs.store( 0 );   // report STBY straight away
+}
+
+/** Decides whether the current frame is written, and closes the file when a
+    take ends. Runs on the capture thread; the decision and the close happen
+    under capture_mutex, so no frame can slip in after a take has ended. */
+void DVgrab::handleGate( bool wanted )
+{
+	bool write = false;
+	unsigned generation = g_arm_generation.load();
+
+	pthread_mutex_lock( &capture_mutex );
+	// A disarm and re-arm between two frames still ends the take.
+	bool rearmed = m_trigger && generation != m_seenArmGeneration;
+	m_seenArmGeneration = generation;
+	if ( m_gateOpen && ( !wanted || rearmed ) )
+		closeTakeLocked( "take_end" );
+
+	if ( wanted && !m_gateOpen )
+	{
+		// Start HDV takes on a GOP boundary so the file begins with a full picture.
+		if ( m_frame->CanStartNewStream() )
+		{
+			m_gateOpen = true;
+			m_takeStartMs = now_ms();
+		}
+	}
+	write = wanted && m_gateOpen;
+	pthread_mutex_unlock( &capture_mutex );
+
+	if ( write )
+		writeFrame();
 }
 
 void DVgrab::captureThreadRun()
@@ -962,6 +1108,10 @@ void DVgrab::captureThreadRun()
 	m_lockPending = true;
 	m_reader_active = true;
 
+	// An exception here used to abort the whole process (std::terminate).
+	// Now the file is closed, the error is reported, and dvgrab exits normally.
+	try
+	{
 	// Loop until we're informed otherwise
 	while ( m_reader_active )
 	{
@@ -1038,39 +1188,30 @@ void DVgrab::captureThreadRun()
 		}
 		else
 		{
+			TimeCode timeCode = { 0, 0, 0, 0 };
+			bool timeCodeValid = m_frame->GetTimeCode( timeCode );
+			{
+				std::lock_guard<std::mutex> lock( m_state );
+				m_curTimeCode = timeCode;
+				m_curTimeCodeValid = timeCodeValid;
+			}
+			// --recordonly: write only while the camera is recording.
+			bool recordOnlyOk = m_jpeg_overwrite ||
+				!m_avc ||
+				!m_isRecordMode ||
+				( m_isRecordMode &&
+				  strcmp( avc1394_vcr_decode_status( m_transportStatus ), "Recording" ) == 0 &&
+				  !( timeCode.hour == 0 && timeCode.min == 0  && timeCode.sec == 0 && timeCode.frame == 0 ) );
+			bool wanted;
 			if ( m_hdv )
-			{
-				HDVFrame *hdvframe = static_cast<HDVFrame*>( m_frame );
-				TimeCode timeCode = { 0, 0, 0, 0 };
-				hdvframe->GetTimeCode( timeCode );
-				if ( ( m_jpeg_overwrite ||
-				       !m_avc ||
-				       !m_isRecordMode ||
-				       ( m_isRecordMode &&
-				         strcmp( avc1394_vcr_decode_status( m_transportStatus ), "Recording" ) == 0 &&
-				         !( timeCode.hour == 0 && timeCode.min == 0  && timeCode.sec == 0 && timeCode.frame == 0 )
-				       )
-				     )
-				)
-				writeFrame();
-			}
+				wanted = recordOnlyOk;
 			else
-			{
-				DVFrame *dvframe = static_cast<DVFrame*>( m_frame );
-				TimeCode timeCode = { 0, 0, 0, 0 };
-				dvframe->GetTimeCode( timeCode );
-				if ( dvframe->IsNormalSpeed() &&
-				     ( m_jpeg_overwrite ||
-				       !m_avc ||
-				       !m_isRecordMode ||
-				       ( m_isRecordMode &&
-				         strcmp( avc1394_vcr_decode_status( m_transportStatus ), "Recording" ) == 0 &&
-				         !( timeCode.hour == 0 && timeCode.min == 0  && timeCode.sec == 0 && timeCode.frame == 0 )
-				       )
-				     )
-				   )
-					writeFrame();
-			}
+				wanted = static_cast<DVFrame*>( m_frame )->IsNormalSpeed() && recordOnlyOk;
+			// --trigger: write only while armed. This is ANDed outside the
+			// group above because "!m_avc" alone makes that group true.
+			if ( m_trigger )
+				wanted = wanted && g_armed.load();
+			handleGate( wanted );
 
 			// drop frame on stdout if getting low on buffers
 			if ( !critical_mass && m_raw_pipe )
@@ -1089,6 +1230,22 @@ void DVgrab::captureThreadRun()
 			}
 		}
 		m_reader->DoneWithFrame( m_frame );
+	}
+	}
+	catch ( std::string s )
+	{
+		fprintf( stderr, "Error: %s\n", s.c_str() );
+		stopCapture( "error" );
+		JsonEvent( "error" ).str( "code", s == "writing failed" ? "write_failed" : "capture_failed" )
+			.str( "message", s ).send();
+		g_done = true;
+	}
+	catch ( ... )
+	{
+		fprintf( stderr, "Error: unknown error in capture thread\n" );
+		stopCapture( "error" );
+		JsonEvent( "error" ).str( "code", "capture_failed" ).str( "message", "unknown" ).send();
+		g_done = true;
 	}
 	m_reader_active = false;
 }
@@ -1124,6 +1281,15 @@ void DVgrab::status( )
 	if ( m_avc->Timecode( m_node, s ) )
 		timecode = s;
 
+	{
+		std::lock_guard<std::mutex> lock( m_state );
+		m_transportString = transportStatus;
+		// AV/C gives HH:MM:SS:FF; keep HH:MM:SS as the JSON fallback timecode.
+		m_avcTimeCode = ( timecode.size() >= 8 && timecode[ 0 ] != '-' ) ? timecode.substr( 0, 8 ) : "";
+	}
+	if ( m_json )
+		return;     // JSON status comes from emitStatus()
+
 	if ( m_writer != NULL )
 		filename = m_writer->GetFileName();
 	else
@@ -1143,6 +1309,72 @@ void DVgrab::status( )
 	         filename.c_str(),
 	         duration.c_str() );
 	fflush( stderr );
+}
+
+void DVgrab::sendReady()
+{
+	char guid[ 32 ];
+	snprintf( guid, sizeof( guid ), "0x%016llx", ( unsigned long long ) m_guid );
+	JsonEvent( "ready" ).str( "version", VERSION ).str( "format", m_hdv ? "HDV" : "DV" )
+		.str( "guid", guid ).boolean( "trigger", m_trigger ).boolean( "recordonly", m_isRecordMode )
+		.boolean( "passive", m_passive ).send();
+}
+
+/** Sends a JSON status line when something visible changed, or once a second
+    as a keep-alive. Called from the main thread. */
+void DVgrab::emitStatus( bool waiting )
+{
+	if ( !m_json )
+		return;
+
+	long long now = now_ms();
+	const char *state;
+	if ( waiting || !m_captureActive )
+		state = "WAIT";
+	else if ( now - m_lastWriteMs.load() < 500 )
+		state = "REC";
+	else
+		state = "STBY";
+
+	std::string timecode, file, transport;
+	{
+		std::lock_guard<std::mutex> lock( m_state );
+		if ( m_curTimeCodeValid )
+		{
+			char buf[ 16 ];
+			snprintf( buf, sizeof( buf ), "%02d:%02d:%02d", m_curTimeCode.hour % 100,
+			          m_curTimeCode.min % 60, m_curTimeCode.sec % 60 );
+			timecode = buf;
+		}
+		else if ( !m_avcTimeCode.empty() )
+			timecode = m_avcTimeCode;
+		else
+			timecode = "--:--:--";
+		file = m_openFile;
+		transport = m_transportString;
+	}
+	if ( strcmp( state, "REC" ) == 0 && file.empty() )
+		state = "STBY";     // a take has just been closed
+	bool recording = strcmp( state, "REC" ) == 0;
+	std::string elapsed = recording ? hms( ( now - m_takeStartMs ) / 1000 ) : "00:00:00";
+	bool armed = g_armed.load() != 0;
+
+	std::string key = std::string( state ) + "|" + timecode + "|" + file + ( armed ? "|A" : "|-" );
+	if ( key == m_lastSentKey && now - m_lastSentMs < 1000 )
+		return;
+	m_lastSentKey = key;
+	m_lastSentMs = now;
+
+	JsonEvent event( "status" );
+	event.str( "status", state ).str( "timecode", timecode ).str( "elapsed", elapsed )
+		.str( "format", m_hdv ? "HDV" : "DV" );
+	if ( !transport.empty() )
+		event.str( "transport", transport );
+	if ( file.empty() )
+		event.null( "file" );
+	else
+		event.str( "file", file );
+	event.boolean( "armed", armed ).send();
 }
 
 bool DVgrab::execute( const char cmd )
@@ -1312,9 +1544,12 @@ bool DVgrab::done()
 			     && AVC1394_MASK_OPCODE( m_transportStatus ) == AVC1394_VCR_RESPONSE_TRANSPORT_STATE_WIND )
 			return true;
 		}
-		
+
+		// SIGUSR1/SIGUSR2 can cut this sleep short too, so an interrupted
+		// sleep no longer means "stop"; SIGINT/SIGTERM set g_done instead.
 		timespec t = {0, 125000000L};
-		return ( nanosleep( &t, NULL ) == -1 );
+		nanosleep( &t, NULL );
+		return g_done;
 	}
 	return true;
 }

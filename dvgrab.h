@@ -35,6 +35,8 @@
 #include "smiltime.h"
 
 #include <stdint.h>
+#include <atomic>
+#include <mutex>
 
 #define DEFAULT_FORMAT (RAW_FORMAT)
 #define DEFAULT_FORMAT_STR "raw"
@@ -50,6 +52,11 @@
 #define DEFAULT_V4L2_DEVICE "/dev/video"
 
 extern int g_debug;
+
+/// DTE record trigger: set by the SIGUSR1 (arm) / SIGUSR2 (disarm) handlers in main.cc.
+extern std::atomic<int> g_armed;
+/// Increased on every SIGUSR1/SIGUSR2, so a disarm+arm between two frames is still seen.
+extern std::atomic<unsigned> g_arm_generation;
 
 class DVgrab
 {
@@ -128,6 +135,28 @@ private:
 
 	unsigned int m_transportStatus;
 
+	// DTE options
+	int m_json;             ///< --json: JSON Lines status on stdout
+	int m_trigger;          ///< --trigger: write only while armed (SIGUSR1/SIGUSR2)
+	int m_passive;          ///< --passive: never send AV/C transport commands
+	int m_sync_interval;    ///< --sync-interval N: fdatasync every N seconds
+
+	// DTE state. Written by the capture thread, read by emitStatus() on the
+	// main thread; strings and timecodes are guarded by m_state.
+	std::mutex m_state;
+	std::atomic<long long> m_lastWriteMs;
+	long long m_takeStartMs;
+	long long m_lastSyncMs;
+	bool m_gateOpen;
+	unsigned m_seenArmGeneration;
+	std::string m_openFile;     ///< file reported by the last file_open, "" if none
+	TimeCode m_curTimeCode;
+	bool m_curTimeCodeValid;
+	std::string m_avcTimeCode;
+	std::string m_transportString;
+	std::string m_lastSentKey;
+	long long m_lastSentMs;
+
 	static void *captureThread( void* );
 	static void *watchdogThreadProxy( void* );
 
@@ -137,8 +166,14 @@ public:
 
 	void getargs( int argc, char *argv[] );
 	void startCapture();
-	void stopCapture();
+	void stopCapture( const char *reason = "stop" );
 	void status();
+	void sendReady();
+	void emitStatus( bool waiting = false );
+	bool isJson()
+	{
+		return m_json;
+	}
 	void watchdogThread();
 	void captureThreadRun();
 	bool execute( const char );
@@ -156,6 +191,10 @@ private:
 	void sendFrameDroppedStatus( const char *reason, const char *meaning );
 	void writeFrame();
 	void cleanup();
+	void handleGate( bool wanted );
+	void closeTakeLocked( const char *reason );
+	void reportFileOpened( const std::string& name );
+	void reportFileClosed( const std::string& name, const char *reason, int frames, float sizeMb );
 
 	void print_usage();
 	void print_help();

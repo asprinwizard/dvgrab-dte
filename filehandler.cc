@@ -396,10 +396,11 @@ bool FileHandler::WriteFrame( Frame *frame )
 				localtime_r( &timesys, &date );
 			}
 
+			// DTE: DD-MM-YYYY_HH-MM-SS (only digits, '-' and '_').
 			stimestamp << setfill( '0' )
-				<< setw( 4 ) << date.tm_year + 1900 << '.'
-				<< setw( 2 ) << date.tm_mon + 1 << '.'
-				<< setw( 2 ) << date.tm_mday << '_'
+				<< setw( 2 ) << date.tm_mday << '-'
+				<< setw( 2 ) << date.tm_mon + 1 << '-'
+				<< setw( 4 ) << date.tm_year + 1900 << '_'
 				<< setw( 2 ) << date.tm_hour << '-'
 				<< setw( 2 ) << date.tm_min << '-'
 				<< setw( 2 ) << date.tm_sec;
@@ -436,12 +437,21 @@ bool FileHandler::WriteFrame( Frame *frame )
 			{
 				sb << stimecode.str();
 			}
-			else 
+			else
 			{
 				sb << stimestamp.str();
 			}
-			sb << GetExtension() << ends;
-			filename = sb.str();
+			// Never overwrite: two takes can get the same name (same second,
+			// or a reset camera clock), and Create() truncates. Add -2, -3, ...
+			std::string stem = sb.str();
+			filename = stem + GetExtension();
+			struct stat stats;
+			for ( int copy = 2; stat( filename.c_str(), &stats ) == 0; ++copy )
+			{
+				ostringstream numbered;
+				numbered << stem << '-' << copy << GetExtension();
+				filename = numbered.str();
+			}
 		}
 		else
 		{
@@ -566,6 +576,14 @@ int RawHandler::Close()
 		close( fd );
 		fd = -1;
 	}
+	return 0;
+}
+
+
+int RawHandler::Sync()
+{
+	if ( fd != -1 && fd != fileno( stdout ) )
+		return fdatasync( fd );
 	return 0;
 }
 
@@ -1384,6 +1402,13 @@ int Mpeg2Handler::Close()
 		close( fd );
 		fd = -1;
 	}
+	return 0;
+}
+
+int Mpeg2Handler::Sync()
+{
+	if ( fd != -1 && fd != fileno( stdout ) )
+		return fdatasync( fd );
 	return 0;
 }
 
